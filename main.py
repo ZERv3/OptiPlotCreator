@@ -135,6 +135,7 @@ class PlotCanvas(FigureCanvasQTAgg):
         inequalities: List[Inequality],
         x_range: tuple[float, float],
         y_range: tuple[float, float],
+        vector: Optional[tuple[float, float]] = None,
     ) -> None:
         self.ax.clear()
         self.ax.set_xlabel("x₁")
@@ -194,7 +195,35 @@ class PlotCanvas(FigureCanvasQTAgg):
         else:
             self.ax.set_title("Общая область пуста", fontsize=12, color="crimson")
 
+        if vector is not None:
+            self._draw_vector(vector)
+
         self.ax.figure.canvas.draw_idle()
+
+    def _draw_vector(self, vector: tuple[float, float]) -> None:
+        a, b = vector
+        color = "firebrick"
+        self.ax.arrow(
+            0,
+            0,
+            a,
+            b,
+            color=color,
+            width=0.0,
+            length_includes_head=True,
+            head_width=max(0.25, 0.02 * max(self.ax.get_xlim()[1] - self.ax.get_xlim()[0], self.ax.get_ylim()[1] - self.ax.get_ylim()[0])),
+            head_length=max(0.35, 0.03 * max(self.ax.get_xlim()[1] - self.ax.get_xlim()[0], self.ax.get_ylim()[1] - self.ax.get_ylim()[0])),
+            linewidth=2.0,
+        )
+        self.ax.scatter([a], [b], color=color, s=40, zorder=5)
+        self.ax.annotate(
+            f"F({a:.2f}, {b:.2f})",
+            xy=(a, b),
+            xytext=(6, 6),
+            textcoords="offset points",
+            color=color,
+            fontsize=9,
+        )
 
     def _build_color_cycle(self, count: int) -> List[str]:
         base_cmap = mcolors.TABLEAU_COLORS
@@ -265,6 +294,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         controls_layout.addWidget(self._build_inequality_group())
         controls_layout.addWidget(self._build_range_group())
+        controls_layout.addWidget(self._build_function_group())
         controls_layout.addStretch(1)
 
         main_layout.addWidget(self.controls_widget, stretch=2)
@@ -362,6 +392,38 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return group
 
+    def _build_function_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("Функция F = a·x₁ + b·x₂")
+        layout = QtWidgets.QGridLayout(group)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(6)
+
+        self.func_a = FloatSpinBox(minimum=-1000, maximum=1000, step=0.5)
+        self.func_b = FloatSpinBox(minimum=-1000, maximum=1000, step=0.5)
+
+        self.func_a.setValue(1.0)
+        self.func_b.setValue(1.0)
+
+        for spin in (self.func_a, self.func_b):
+            spin.valueChanged.connect(self._handle_function_change)
+
+        layout.addWidget(QtWidgets.QLabel("a"), 0, 0)
+        layout.addWidget(self.func_a, 0, 1)
+        layout.addWidget(QtWidgets.QLabel("b"), 1, 0)
+        layout.addWidget(self.func_b, 1, 1)
+
+        self.function_label = QtWidgets.QLabel()
+        self.function_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        font = self.function_label.font()
+        font.setPointSize(11)
+        self.function_label.setFont(font)
+        layout.addWidget(self.function_label, 2, 0, 1, 2)
+
+        self._update_function_label()
+
+        return group
+
     def _handle_add_inequality(self) -> None:
         self._append_inequality(Inequality())
         self._refresh_plot()
@@ -404,7 +466,19 @@ class MainWindow(QtWidgets.QMainWindow):
         x_range = (min(self.x_min.value(), self.x_max.value()), max(self.x_min.value(), self.x_max.value()))
         y_range = (min(self.y_min.value(), self.y_max.value()), max(self.y_min.value(), self.y_max.value()))
         inequalities = self._collect_inequalities()
-        self.canvas.draw_system(inequalities, x_range, y_range)
+        vector = (self.func_a.value(), self.func_b.value()) if hasattr(self, "func_a") else None
+        self.canvas.draw_system(inequalities, x_range, y_range, vector)
+
+    def _handle_function_change(self, _value: float) -> None:
+        self._update_function_label()
+        self._refresh_plot()
+
+    def _update_function_label(self) -> None:
+        if not hasattr(self, "function_label"):
+            return
+        a = self.func_a.value()
+        b = self.func_b.value()
+        self.function_label.setText(f"F = {a:.2f}·x₁ + {b:.2f}·x₂")
 
 
 def main() -> None:
