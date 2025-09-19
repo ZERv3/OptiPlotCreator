@@ -9,13 +9,17 @@ from typing import List, Optional
 
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
+import io
+
 from matplotlib import colors as mcolors
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
 
 TOLERANCE = 1e-6
-DEFAULT_RANGE = (-10.0, 10.0)
+DEFAULT_RANGE = (0.0, 10.0)
 GRID_POINTS = 400
 
 
@@ -53,6 +57,66 @@ class FloatSpinBox(QtWidgets.QDoubleSpinBox):
         self.setDecimals(decimals)
         self.setSingleStep(step)
         self.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+
+
+class LatexLabel(QtWidgets.QLabel):
+    """QLabel capable of rendering LaTeX strings via matplotlib."""
+
+    def __init__(self, dpi: int = 150, min_height: int = 120, parent=None):
+        super().__init__(parent)
+        self._dpi = dpi
+        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumHeight(min_height)
+        self.setStyleSheet("background-color: white; border: 1px solid #d0d0d0;")
+
+    def set_latex(self, expression: Optional[str]) -> None:
+        if not expression:
+            self.clear()
+            return
+
+        if "\n" in expression:
+            lines = [line.strip() for line in expression.split("\n") if line.strip()]
+        else:
+            lines = [expression.strip()]
+
+        if not lines:
+            self.clear()
+            return
+
+        formatted_lines = [line if (line.startswith("$") and line.endswith("$")) else f"${line}$" for line in lines]
+
+        max_len = max(len(line) for line in formatted_lines)
+        width_in = max(2.0, 0.12 * max_len)
+        height_in = max(0.6, 0.45 * len(formatted_lines))
+
+        try:
+            fig = Figure(figsize=(width_in, height_in), dpi=self._dpi)
+            fig.patch.set_facecolor("white")
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.axis("off")
+
+            total = len(formatted_lines)
+            for idx, line in enumerate(formatted_lines):
+                y = 1.0 - (idx + 0.5) / max(total, 1)
+                ax.text(0.5, y, line, ha="center", va="center", fontsize=14)
+
+            buffer = io.BytesIO()
+            canvas.print_png(buffer)
+        except Exception:
+            self.clear()
+            return
+
+        buffer.seek(0)
+        data = buffer.getvalue()
+        image = QtGui.QImage.fromData(data, "PNG")
+        if image.isNull():
+            self.clear()
+            return
+
+        pixmap = QtGui.QPixmap.fromImage(image)
+        self.setPixmap(pixmap)
+        self.setFixedHeight(max(self.minimumHeight(), pixmap.height() + 10))
 
 
 class InequalityEditor(QtWidgets.QWidget):
@@ -169,7 +233,12 @@ class PlotCanvas(FigureCanvasQTAgg):
             # Highlight boundary line for non-equalities.
             self._draw_boundary(inequality, x_range, y_range)
 
+        intersection_centroid = None
         if intersection_mask.any():
+            intersection_centroid = (
+                float(X[intersection_mask].mean()),
+                float(Y[intersection_mask].mean()),
+            )
             colormap = mcolors.ListedColormap([(0, 0, 0, 0), (0.5, 0.5, 0.5, 0.45)])
             self.ax.imshow(
                 intersection_mask.astype(float),
@@ -183,12 +252,28 @@ class PlotCanvas(FigureCanvasQTAgg):
         else:
             self.ax.set_title("Общая область пуста", fontsize=12, color="crimson")
 
+        base_point = None
+        intersection_point = None
+        if vector is not None and intersection_mask.any():
+            base_point, intersection_point = self._find_support_point(
+                vector,
+                x_values,
+                y_values,
+                intersection_mask,
+            )
+
         if vector is not None:
-            self._draw_vector(vector)
+            base_for_perpendicular = base_point if base_point is not None else intersection_centroid
+            self._draw_vector(vector, base_for_perpendicular, intersection_point)
 
         self.ax.figure.canvas.draw_idle()
 
-    def _draw_vector(self, vector: tuple[float, float]) -> None:
+    def _draw_vector(
+        self,
+        vector: tuple[float, float],
+        perpendicular_base: Optional[tuple[float, float]] = None,
+        intersection_point: Optional[tuple[float, float]] = None,
+    ) -> None:
         a, b = vector
         color = "red"
         magnitude = np.hypot(a, b)
@@ -208,6 +293,19 @@ class PlotCanvas(FigureCanvasQTAgg):
             linestyle="--",
             linewidth=1.2,
             alpha=0.8,
+        )
+
+        # Draw perpendicular line through the support point (or origin if absent).
+        perp_direction = np.array([-direction[1], direction[0]])
+        base_point = np.array([0.0, 0.0]) if perpendicular_base is None else np.array(perpendicular_base)
+        perp_points = base_point + np.outer([-half_length, half_length], perp_direction)
+        self.ax.plot(
+            perp_points[:, 0],
+            perp_points[:, 1],
+            color=color,
+            linestyle=":",
+            linewidth=1.0,
+            alpha=0.7,
         )
 
         self.ax.arrow(
@@ -231,6 +329,176 @@ class PlotCanvas(FigureCanvasQTAgg):
             color=color,
             fontsize=9,
         )
+
+        if intersection_point is not None:
+            self.ax.scatter([intersection_point[0]], [intersection_point[1]], color="black", s=60, zorder=7)
+
+    def _find_support_point(
+        self,
+        vector: tuple[float, float],
+        x_values: np.ndarray,
+        y_values: np.ndarray,
+        intersection_mask: np.ndarray,
+    ) -> tuple[Optional[tuple[float, float]], Optional[tuple[float, float]]]:
+        a, b = vector
+        magnitude = np.hypot(a, b)
+        if magnitude < TOLERANCE:
+            return (None, None)
+
+        direction = np.array([a, b]) / magnitude
+        dx, dy = direction
+        perp = np.array([-dy, dx])
+
+        # Determine maximum positive parameter t before leaving plot bounds.
+        t_candidates: list[float] = []
+
+        def append_limit(component: float, lower: float, upper: float) -> None:
+            if abs(component) < TOLERANCE:
+                if lower <= 0.0 <= upper:
+                    t_candidates.append(np.inf)
+                return
+            if component > 0:
+                limit = upper / component
+                if limit > 0:
+                    t_candidates.append(limit)
+            else:
+                limit = lower / component
+                if limit > 0:
+                    t_candidates.append(limit)
+
+        append_limit(dx, x_values[0], x_values[-1])
+        append_limit(dy, y_values[0], y_values[-1])
+
+        if not t_candidates:
+            return (None, None)
+
+        t_max = min(t_candidates)
+        if not np.isfinite(t_max) or t_max <= 0:
+            return (None, None)
+
+        # Helper to test whether a point lies inside the intersection mask.
+        x_min, x_max = x_values[0], x_values[-1]
+        y_min, y_max = y_values[0], y_values[-1]
+        x_step = x_values[1] - x_values[0] if len(x_values) > 1 else 1.0
+        y_step = y_values[1] - y_values[0] if len(y_values) > 1 else 1.0
+
+        max_x_idx = len(x_values) - 1
+        max_y_idx = len(y_values) - 1
+
+        def point_inside(px: float, py: float) -> bool:
+            if px < x_min or px > x_max or py < y_min or py > y_max:
+                return False
+            ix = int(round((px - x_min) / x_step))
+            iy = int(round((py - y_min) / y_step))
+            ix = int(np.clip(ix, 0, max_x_idx))
+            iy = int(np.clip(iy, 0, max_y_idx))
+            return bool(intersection_mask[iy, ix])
+
+        span = max(x_max - x_min, y_max - y_min)
+        s_values = np.linspace(-span, span, 256)
+
+        def sample_intersection(t_val: float) -> tuple[bool, Optional[np.ndarray], Optional[float]]:
+            center = direction * t_val
+            best_s = None
+            min_abs_s = None
+            for s in s_values:
+                px, py = center + s * perp
+                if point_inside(px, py):
+                    abs_s = abs(s)
+                    if min_abs_s is None or abs_s < min_abs_s:
+                        min_abs_s = abs_s
+                        best_s = s
+            if best_s is None:
+                return False, None, None
+            boundary_point = self._refine_boundary_point(center, perp, best_s, point_inside, span)
+            return True, boundary_point, best_s
+
+        t_values = np.linspace(0.0, t_max, 512)
+        inside_flags: list[bool] = []
+        intersection_cache: list[Optional[np.ndarray]] = []
+        for t_val in t_values:
+            flag, point, _ = sample_intersection(t_val)
+            inside_flags.append(flag)
+            intersection_cache.append(point)
+
+        last_inside_idx = None
+        for idx, flag in enumerate(inside_flags):
+            if flag:
+                last_inside_idx = idx
+            elif last_inside_idx is not None:
+                break
+
+        if last_inside_idx is None:
+            return (None, None)
+
+        # Find first outside point after the last inside to refine boundary.
+        t_low = t_values[last_inside_idx]
+        t_high = t_max
+        best_point = intersection_cache[last_inside_idx]
+        for idx in range(last_inside_idx + 1, len(t_values)):
+            if not inside_flags[idx]:
+                t_high = t_values[idx]
+                break
+
+        for _ in range(20):
+            t_mid = 0.5 * (t_low + t_high)
+            flag, point, _ = sample_intersection(t_mid)
+            if flag:
+                t_low = t_mid
+                best_point = point
+            else:
+                t_high = t_mid
+
+        base_point = direction * t_low
+        if best_point is not None:
+            return (
+                (float(base_point[0]), float(base_point[1])),
+                (float(best_point[0]), float(best_point[1])),
+            )
+        return (float(base_point[0]), float(base_point[1])), None
+
+    def _refine_boundary_point(
+        self,
+        center: np.ndarray,
+        perp: np.ndarray,
+        s_inside: float,
+        point_inside_fn,
+        span: float,
+    ) -> np.ndarray:
+        step = max(span / 256.0, 1e-3)
+
+        def binary_search(s_low: float, s_high: float) -> float:
+            for _ in range(25):
+                s_mid = 0.5 * (s_low + s_high)
+                px, py = center + s_mid * perp
+                if point_inside_fn(px, py):
+                    s_low = s_mid
+                else:
+                    s_high = s_mid
+            return s_low
+
+        if abs(s_inside) < TOLERANCE:
+            for sign in (1.0, -1.0):
+                s_out = s_inside
+                while abs(s_out) <= span:
+                    s_out += sign * step
+                    px, py = center + s_out * perp
+                    if not point_inside_fn(px, py):
+                        boundary_s = binary_search(s_inside, s_out)
+                        return center + boundary_s * perp
+                # fallback to next sign
+            return center + s_inside * perp
+
+        sign = 1.0 if s_inside > 0 else -1.0
+        s_out = s_inside
+        while abs(s_out) <= span:
+            s_out += sign * step
+            px, py = center + s_out * perp
+            if not point_inside_fn(px, py):
+                boundary_s = binary_search(s_inside, s_out)
+                return center + boundary_s * perp
+
+        return center + s_inside * perp
 
     def _draw_boundary(
         self,
@@ -291,6 +559,7 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(self._build_inequality_group())
         controls_layout.addWidget(self._build_range_group())
         controls_layout.addWidget(self._build_function_group())
+        controls_layout.addWidget(self._build_latex_group())
         controls_layout.addStretch(1)
 
         main_layout.addWidget(self.controls_widget, stretch=2)
@@ -420,6 +689,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return group
 
+    def _build_latex_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("LaTeX отображение")
+        layout = QtWidgets.QVBoxLayout(group)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        self.system_latex_label = LatexLabel(min_height=140)
+        self.system_latex_label.setToolTip("Система неравенств")
+
+        self.function_latex_label = LatexLabel(min_height=80)
+        self.function_latex_label.setToolTip("Целевая функция")
+
+        layout.addWidget(QtWidgets.QLabel("Система"))
+        layout.addWidget(self.system_latex_label)
+        layout.addWidget(QtWidgets.QLabel("Функция"))
+        layout.addWidget(self.function_latex_label)
+
+        return group
+
     def _handle_add_inequality(self) -> None:
         self._append_inequality(Inequality())
         self._refresh_plot()
@@ -464,6 +752,7 @@ class MainWindow(QtWidgets.QMainWindow):
         inequalities = self._collect_inequalities()
         vector = (self.func_a.value(), self.func_b.value()) if hasattr(self, "func_a") else None
         self.canvas.draw_system(inequalities, x_range, y_range, vector)
+        self._update_latex_display(inequalities)
 
     def _handle_function_change(self, _value: float) -> None:
         self._update_function_label()
@@ -475,6 +764,72 @@ class MainWindow(QtWidgets.QMainWindow):
         a = self.func_a.value()
         b = self.func_b.value()
         self.function_label.setText(f"F = {a:.2f}·x₁ + {b:.2f}·x₂")
+
+    def _update_latex_display(self, inequalities: List[Inequality]) -> None:
+        if not hasattr(self, "system_latex_label"):
+            return
+        system_expr = self._build_system_latex(inequalities)
+        self.system_latex_label.set_latex(system_expr)
+
+        func_expr = self._format_linear_expression(self.func_a.value(), self.func_b.value())
+        if func_expr:
+            self.function_latex_label.set_latex(f"F = {func_expr}")
+        else:
+            self.function_latex_label.set_latex("F = 0")
+
+    def _format_number(self, value: float) -> str:
+        if abs(value) < TOLERANCE:
+            return "0"
+        rounded = round(value)
+        if abs(value - rounded) < 1e-9:
+            return str(int(rounded))
+        return f"{value:.2f}"
+
+    def _format_linear_expression(self, a: float, b: float) -> str:
+        terms: list[str] = []
+        for coeff, symbol in ((a, r"x_{1}"), (b, r"x_{2}")):
+            if abs(coeff) < TOLERANCE:
+                continue
+            coeff_sign = 1 if coeff >= 0 else -1
+            coeff_abs = abs(coeff)
+            is_one = abs(coeff_abs - 1.0) < 1e-9
+
+            if not terms:
+                if coeff_sign < 0:
+                    prefix = "-"
+                else:
+                    prefix = ""
+            else:
+                prefix = "+" if coeff_sign > 0 else "-"
+
+            if is_one:
+                term_body = symbol
+            else:
+                term_body = f"{self._format_number(coeff_abs)}\\,{symbol}"
+
+            if not terms:
+                terms.append(f"{prefix}{term_body}" if prefix else term_body)
+            else:
+                sign = f"{prefix}\\," if prefix else ""
+                terms.append(f"{sign}{term_body}")
+
+        if not terms:
+            return "0"
+        return " ".join(terms)
+
+    def _build_system_latex(self, inequalities: List[Inequality]) -> str:
+        if not inequalities:
+            return r"\text{Нет неравенств}"
+
+        op_map = {"<": "<", "<=": "\\leq", ">": ">", ">=": "\\geq", "=": "="}
+        rows: list[str] = []
+        for ineq in inequalities:
+            expr = self._format_linear_expression(ineq.a, ineq.b)
+            rhs = self._format_number(ineq.c)
+            op = op_map.get(ineq.operator, "=")
+            rows.append(f"{expr} {op} {rhs}")
+
+        return "\n".join(rows)
 
 
 def main() -> None:
