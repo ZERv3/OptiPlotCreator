@@ -4,7 +4,7 @@
 	```
 	cd path/to/OptiPlotCreator
 	source .venv/bin/activate
-	python3 -m main.py
+	python3 main.py
 	```
 ## Как работает программа
 
