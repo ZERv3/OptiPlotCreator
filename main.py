@@ -155,34 +155,22 @@ class PlotCanvas(FigureCanvasQTAgg):
         X, Y = np.meshgrid(x_values, y_values)
 
         extent = [x_range[0], x_range[1], y_range[0], y_range[1]]
-        colors_cycle = self._build_color_cycle(len(inequalities))
         intersection_mask = np.ones_like(X, dtype=bool)
 
-        for idx, inequality in enumerate(inequalities):
+        for inequality in inequalities:
             mask = inequality.evaluate(X, Y)
-            color = colors_cycle[idx]
 
             if inequality.operator == "=":
-                self._draw_equality(inequality, x_range, y_range, color)
+                self._draw_equality(inequality, x_range, y_range)
                 intersection_mask &= mask
                 continue
 
             intersection_mask &= mask
-            colormap = mcolors.ListedColormap([(0, 0, 0, 0), mcolors.to_rgba(color, alpha=0.35)])
-            self.ax.imshow(
-                mask.astype(float),
-                extent=extent,
-                origin="lower",
-                cmap=colormap,
-                vmin=0,
-                vmax=1,
-                interpolation="nearest",
-            )
             # Highlight boundary line for non-equalities.
-            self._draw_boundary(inequality, x_range, y_range, color)
+            self._draw_boundary(inequality, x_range, y_range)
 
         if intersection_mask.any():
-            colormap = mcolors.ListedColormap([(0, 0, 0, 0), (0.0, 0.0, 0.0, 0.55)])
+            colormap = mcolors.ListedColormap([(0, 0, 0, 0), (0.5, 0.5, 0.5, 0.45)])
             self.ax.imshow(
                 intersection_mask.astype(float),
                 extent=extent,
@@ -202,7 +190,26 @@ class PlotCanvas(FigureCanvasQTAgg):
 
     def _draw_vector(self, vector: tuple[float, float]) -> None:
         a, b = vector
-        color = "firebrick"
+        color = "red"
+        magnitude = np.hypot(a, b)
+        if magnitude < TOLERANCE:
+            return
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        span = max(xlim[1] - xlim[0], ylim[1] - ylim[0])
+        half_length = span
+        direction = np.array([a, b]) / magnitude
+        line_points = np.outer([-half_length, half_length], direction)
+
+        self.ax.plot(
+            line_points[:, 0],
+            line_points[:, 1],
+            color=color,
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.8,
+        )
+
         self.ax.arrow(
             0,
             0,
@@ -225,21 +232,11 @@ class PlotCanvas(FigureCanvasQTAgg):
             fontsize=9,
         )
 
-    def _build_color_cycle(self, count: int) -> List[str]:
-        base_cmap = mcolors.TABLEAU_COLORS
-        keys = list(base_cmap.keys())
-        colors_list = [base_cmap[key] for key in keys]
-        # Repeat colors if there are more inequalities than unique colors in the base set.
-        while len(colors_list) < count:
-            colors_list.extend(colors_list)
-        return colors_list[:count]
-
     def _draw_boundary(
         self,
         inequality: Inequality,
         x_range: tuple[float, float],
         y_range: tuple[float, float],
-        color: str,
     ) -> None:
         a, b, c = inequality.a, inequality.b, inequality.c
         x_vals = np.linspace(x_range[0], x_range[1], 400)
@@ -248,18 +245,17 @@ class PlotCanvas(FigureCanvasQTAgg):
             valid = (y_vals >= y_range[0]) & (y_vals <= y_range[1])
             if np.any(valid):
                 linestyle = "--" if inequality.operator in {"<", ">"} else "-"
-                self.ax.plot(x_vals[valid], y_vals[valid], color=color, linestyle=linestyle, linewidth=1.6)
+                self.ax.plot(x_vals[valid], y_vals[valid], color="black", linestyle=linestyle, linewidth=1.6)
         elif abs(a) > TOLERANCE:
             x_line = np.full_like(np.linspace(y_range[0], y_range[1], 400), c / a)
             linestyle = "--" if inequality.operator in {"<", ">"} else "-"
-            self.ax.plot(x_line, np.linspace(y_range[0], y_range[1], 400), color=color, linestyle=linestyle, linewidth=1.6)
+            self.ax.plot(x_line, np.linspace(y_range[0], y_range[1], 400), color="black", linestyle=linestyle, linewidth=1.6)
 
     def _draw_equality(
         self,
         inequality: Inequality,
         x_range: tuple[float, float],
         y_range: tuple[float, float],
-        color: str,
     ) -> None:
         a, b, c = inequality.a, inequality.b, inequality.c
         x_vals = np.linspace(x_range[0], x_range[1], 400)
@@ -267,10 +263,10 @@ class PlotCanvas(FigureCanvasQTAgg):
             y_vals = (c - a * x_vals) / b
             valid = (y_vals >= y_range[0]) & (y_vals <= y_range[1])
             if np.any(valid):
-                self.ax.plot(x_vals[valid], y_vals[valid], color=color, linewidth=2.0)
+                self.ax.plot(x_vals[valid], y_vals[valid], color="black", linewidth=2.0)
         elif abs(a) > TOLERANCE:
             x_line = np.full_like(np.linspace(y_range[0], y_range[1], 400), c / a)
-            self.ax.plot(x_line, np.linspace(y_range[0], y_range[1], 400), color=color, linewidth=2.0)
+            self.ax.plot(x_line, np.linspace(y_range[0], y_range[1], 400), color="black", linewidth=2.0)
 
 
 class MainWindow(QtWidgets.QMainWindow):
