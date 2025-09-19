@@ -168,16 +168,6 @@ class PlotCanvas(FigureCanvasQTAgg):
                 continue
 
             intersection_mask &= mask
-            colormap = mcolors.ListedColormap([(0, 0, 0, 0), mcolors.to_rgba(color, alpha=0.35)])
-            self.ax.imshow(
-                mask.astype(float),
-                extent=extent,
-                origin="lower",
-                cmap=colormap,
-                vmin=0,
-                vmax=1,
-                interpolation="nearest",
-            )
             # Highlight boundary line for non-equalities.
             self._draw_boundary(inequality, x_range, y_range, color)
 
